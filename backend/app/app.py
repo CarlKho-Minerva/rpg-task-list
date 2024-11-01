@@ -1,36 +1,40 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import sqlite3
+from sqlalchemy import create_engine, Column, String
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 import uuid
 from werkzeug.exceptions import BadRequest, NotFound
 
 app = Flask(__name__)
 CORS(app)
 
-DATABASE = "tasks.db"
+DATABASE_URL = "sqlite:///tasks.db"
+engine = create_engine(DATABASE_URL)
+Session = sessionmaker(bind=engine)
+session = Session()
+Base = declarative_base()
 
 
-def get_db():
-    db = sqlite3.connect(DATABASE)
-    db.row_factory = sqlite3.Row
-    return db
+class Task(Base):
+    __tablename__ = "tasks"
+    id = Column(String, primary_key=True)
+    description = Column(String)
+    status = Column(String)
 
 
-def init_db():
-    with app.app_context():
-        db = get_db()
-        db.execute(
-            """CREATE TABLE IF NOT EXISTS tasks
-                      (id TEXT PRIMARY KEY, description TEXT, status TEXT)"""
-        )
-        db.commit()
+Base.metadata.create_all(engine)
 
 
 @app.route("/api/tasks", methods=["GET"])
 def get_tasks():
-    db = get_db()
-    tasks = db.execute("SELECT * FROM tasks").fetchall()
-    return jsonify([dict(task) for task in tasks])
+    tasks = session.query(Task).all()
+    return jsonify(
+        [
+            {"id": task.id, "description": task.description, "status": task.status}
+            for task in tasks
+        ]
+    )
 
 
 @app.route("/api/tasks", methods=["POST"])
@@ -43,12 +47,11 @@ def add_task():
             )
 
         task_id = str(uuid.uuid4())
-        db = get_db()
-        db.execute(
-            "INSERT INTO tasks (id, description, status) VALUES (?, ?, ?)",
-            (task_id, new_task["description"], new_task["status"]),
+        task = Task(
+            id=task_id, description=new_task["description"], status=new_task["status"]
         )
-        db.commit()
+        session.add(task)
+        session.commit()
         return jsonify({"id": task_id, **new_task}), 201
     except BadRequest as e:
         return jsonify({"error": str(e)}), 400
@@ -63,16 +66,13 @@ def update_task(task_id):
         if not update_data or "status" not in update_data:
             raise BadRequest("Invalid update data. 'status' is required.")
 
-        db = get_db()
-        db.execute(
-            "UPDATE tasks SET status = ? WHERE id = ?", (update_data["status"], task_id)
-        )
-        db.commit()
-        updated_task = db.execute(
-            "SELECT * FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
-        if updated_task:
-            return jsonify(dict(updated_task))
+        task = session.query(Task).filter_by(id=task_id).first()
+        if task:
+            task.status = update_data["status"]
+            session.commit()
+            return jsonify(
+                {"id": task.id, "description": task.description, "status": task.status}
+            )
         raise NotFound("Task not found")
     except BadRequest as e:
         return jsonify({"error": str(e)}), 400
@@ -93,5 +93,5 @@ def server_error(error):
 
 
 if __name__ == "__main__":
-    init_db()
+    Base.metadata.create_all(engine)
     app.run(debug=True, port=5000)
